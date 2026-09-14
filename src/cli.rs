@@ -953,6 +953,15 @@ Documentation=https://github.com/Code-Sapling/gigabytectl
 # ordering closes a cycle and systemd silently drops this unit's start job at
 # boot. `gigabytectl sync` waits for PPD on the bus instead.
 Wants=power-profiles-daemon.service
+# A driver fault must not be able to take the machine down. `sync` writes to
+# sysfs nodes owned by gigabyte-laptop-wmi, and a bug there kills this process
+# inside write(2) rather than returning an error it could handle -- so the
+# failure looks identical to a crash and `Restart=on-failure` starts it again
+# two seconds later, forever. Without a limit that loop has run a faulting
+# driver ten thousand times in one boot and frozen the laptop. Five tries in a
+# minute, then systemd gives up and `systemctl status` says why.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -1054,5 +1063,22 @@ mod tests {
             include_str!("../assets/gigabytectl-ppd-sync.service"),
             service_unit(Path::new("/usr/local/bin/gigabytectl"))
         );
+    }
+
+    /// `Restart=on-failure` without a start limit is what let a faulting driver
+    /// be re-run ten thousand times in one boot. The limit is the only thing
+    /// standing between a kernel bug and a frozen laptop, because the fault
+    /// kills this process inside `write(2)` where it cannot handle anything.
+    #[test]
+    fn the_unit_gives_up_rather_than_restarting_forever() {
+        let unit = service_unit(Path::new("/usr/local/bin/gigabytectl"));
+        assert!(unit.contains("Restart=on-failure"), "{unit}");
+        assert!(unit.contains("StartLimitIntervalSec="), "{unit}");
+        assert!(unit.contains("StartLimitBurst="), "{unit}");
+        // Both belong to [Unit]: systemd parses them nowhere else, and putting
+        // them under [Service] is silently ignored on current versions.
+        let (unit_section, service_section) = unit.split_once("[Service]").expect("a [Service] section");
+        assert!(unit_section.contains("StartLimitBurst="), "{unit}");
+        assert!(!service_section.contains("StartLimitBurst="), "{unit}");
     }
 }
